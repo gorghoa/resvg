@@ -178,7 +178,10 @@ fn has_only_paths(group: &usvg::Group) -> bool {
 
 /// The canvas area a clip path can let through, expanded by 2px on each side
 /// (like group layers) so that anti-aliased edges are kept.
-fn clip_bounds(clip: &usvg::ClipPath, transform: tiny_skia::Transform) -> Option<tiny_skia::IntRect> {
+fn clip_bounds(
+    clip: &usvg::ClipPath,
+    transform: tiny_skia::Transform,
+) -> Option<tiny_skia::IntRect> {
     // Rotated or skewed clip paths keep the full layer, as before: shrinking
     // it changes the anti-aliasing of a few edge pixels.
     let transform = transform.pre_concat(clip.transform());
