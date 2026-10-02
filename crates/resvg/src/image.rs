@@ -1,8 +1,36 @@
 // Copyright 2018 the Resvg Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// Raster images decoded during one render, so that an image drawn several
+/// times (e.g. through many `use` elements) is not decoded again each time.
+///
+/// An image is kept decoded only once it has been drawn twice: images drawn
+/// a single time, the common case, cost no more memory than before.
+///
+/// usvg creates a new data buffer for every instance of an image (each `use`
+/// decodes the data URL again), so entries are matched by content, after a
+/// cheap pointer and length check.
+#[derive(Default)]
+pub struct RasterCache {
+    #[cfg_attr(not(feature = "raster-images"), allow(dead_code))]
+    entries: RefCell<Vec<(Arc<Vec<u8>>, CachedRaster)>>,
+}
+
+#[cfg_attr(not(feature = "raster-images"), allow(dead_code))]
+enum CachedRaster {
+    /// Drawn once, not kept.
+    Seen,
+    /// Drawn at least twice. `None` when decoding failed.
+    Decoded(Option<Rc<tiny_skia::Pixmap>>),
+}
+
 pub fn render(
     image: &usvg::Image,
+    #[allow(unused_variables)] ctx: &crate::render::Context,
     transform: tiny_skia::Transform,
     pixmap: &mut tiny_skia::PixmapMut,
 ) {
@@ -10,26 +38,50 @@ pub fn render(
         return;
     }
 
-    render_inner(image.kind(), transform, image.rendering_mode(), pixmap);
-}
-
-pub fn render_inner(
-    image_kind: &usvg::ImageKind,
-    transform: tiny_skia::Transform,
-    #[allow(unused_variables)] rendering_mode: usvg::ImageRendering,
-    pixmap: &mut tiny_skia::PixmapMut,
-) {
-    match image_kind {
+    match image.kind() {
         usvg::ImageKind::SVG(tree) => {
             render_vector(tree, transform, pixmap);
         }
         #[cfg(feature = "raster-images")]
-        _ => {
-            raster_images::render_raster(image_kind, transform, rendering_mode, pixmap);
+        kind => {
+            if let Some(raster) = ctx.raster_cache.get_or_decode(kind) {
+                raster_images::render_raster(&raster, transform, image.rendering_mode(), pixmap);
+            }
         }
         #[cfg(not(feature = "raster-images"))]
         _ => {
             log::warn!("Images decoding was disabled by a build feature.");
+        }
+    }
+}
+
+#[cfg(feature = "raster-images")]
+impl RasterCache {
+    fn get_or_decode(&self, kind: &usvg::ImageKind) -> Option<Rc<tiny_skia::Pixmap>> {
+        let data = match kind {
+            usvg::ImageKind::JPEG(data)
+            | usvg::ImageKind::PNG(data)
+            | usvg::ImageKind::GIF(data)
+            | usvg::ImageKind::WEBP(data) => data,
+            usvg::ImageKind::SVG(_) => return None,
+        };
+
+        let mut entries = self.entries.borrow_mut();
+        let entry = entries.iter_mut().find(|(cached, _)| {
+            Arc::ptr_eq(cached, data) || (cached.len() == data.len() && cached[..] == data[..])
+        });
+
+        match entry {
+            Some((_, CachedRaster::Decoded(raster))) => raster.clone(),
+            Some((_, cached)) => {
+                let raster = raster_images::decode_raster(kind).map(Rc::new);
+                *cached = CachedRaster::Decoded(raster.clone());
+                raster
+            }
+            None => {
+                entries.push((data.clone(), CachedRaster::Seen));
+                raster_images::decode_raster(kind).map(Rc::new)
+            }
         }
     }
 }
@@ -59,7 +111,7 @@ mod raster_images {
     use std::io::Cursor;
     use usvg::ImageRendering;
 
-    fn decode_raster(image: &usvg::ImageKind) -> Option<tiny_skia::Pixmap> {
+    pub(crate) fn decode_raster(image: &usvg::ImageKind) -> Option<tiny_skia::Pixmap> {
         match image {
             usvg::ImageKind::SVG(_) => None,
             usvg::ImageKind::JPEG(data) => {
@@ -171,13 +223,11 @@ mod raster_images {
     }
 
     pub(crate) fn render_raster(
-        image: &usvg::ImageKind,
+        raster: &tiny_skia::Pixmap,
         transform: tiny_skia::Transform,
         rendering_mode: usvg::ImageRendering,
         pixmap: &mut tiny_skia::PixmapMut,
     ) -> Option<()> {
-        let raster = decode_raster(image)?;
-
         let rect = tiny_skia::Size::from_wh(raster.width() as f32, raster.height() as f32)?
             .to_rect(0.0, 0.0)?;
 
