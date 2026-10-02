@@ -195,12 +195,10 @@ fn clip_bounds(
     clip: &usvg::ClipPath,
     transform: tiny_skia::Transform,
 ) -> Option<tiny_skia::IntRect> {
-    // Rotated or skewed clip paths keep the full layer, as before: shrinking
-    // it changes the anti-aliasing of a few edge pixels.
+    // Rotated or skewed clip paths are bounded by the axis-aligned box of
+    // their transformed bounds. Moving the layer origin can change the
+    // anti-aliasing of a few edge pixels.
     let transform = transform.pre_concat(clip.transform());
-    if transform.has_skew() {
-        return None;
-    }
 
     let bbox = clip
         .root()
